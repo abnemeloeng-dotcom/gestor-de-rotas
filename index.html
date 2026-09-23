@@ -960,17 +960,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
 <div class="container">
 
-  <div class="card" style="background:#f0f9f4; border-color:#bfe6cc;">
-    <div class="hint" style="margin:0; color:#166530;">
-      📶 <b>O que funciona sem internet:</b> adicionar/ler a lista de paradas, reordenar manualmente, otimizar a rota por distância em linha reta, e navegar pelo Organic Maps/Maps.me (se você já tiver baixado o mapa offline da região naquele app). <b>Precisam de internet:</b> o desenho das ruas no mapa aqui dentro da ferramenta (sem internet os pontos aparecem certos, só sem o fundo do mapa), o botão de abrir no Google Maps, e a otimização por rota real de estrada (cai para linha reta se não conseguir se conectar).
-    </div>
-  </div>
-
   <div class="card">
     <h2>🧭 App de navegação offline</h2>
-    <div class="hint">
-      Escolha qual app usar nos botões "Navegar" da lista abaixo. <b>Organic Maps</b> é a recomendação: é a continuação, sem anúncios, do mesmo projeto que deu origem ao Maps.me — mas se você já usa o Maps.me e tem os mapas da sua região baixados nele, pode deixar selecionado. Em qualquer um dos dois, baixe o mapa offline da sua região DENTRO do app escolhido antes de ir a campo, senão ele não vai conseguir calcular a rota sem internet.
-    </div>
+    <div class="hint">App usado nos botões "Navegar" da lista e do mapa. Baixe o mapa da sua região dentro do app antes de ir a campo.</div>
     <div class="row-actions">
       <label style="display:flex; align-items:center; gap:6px; font-size:0.88rem; cursor:pointer;">
         <input type="radio" name="nav-app" value="organicmaps" id="nav-app-organic" checked> Organic Maps (recomendado)
@@ -1689,14 +1681,16 @@ function renderMap() {
   }
 
   const latlngs = [];
-  validStops.forEach((s) => {
+  validStops.forEach((s, i) => {
     const badge = badges[s.id];
     const isRange = s.dateEnd && s.dateEnd > s.date;
     const marker = L.marker([s.lat, s.lng], { icon: numberedIcon(badge, false, !!s.date, isRange) });
     const rangeInfo = isRange
       ? `<br>Em andamento: ${formatDatePt(s.date)} a ${formatDatePt(s.dateEnd)} (${stopDurationDays(s)} dias)`
       : '';
-    marker.bindPopup(`<b>${escapeHtml(badge)}. ${escapeHtml(s.label)}</b>${rangeInfo}<br>${s.lat.toFixed(5)}, ${s.lng.toFixed(5)}<br><a href="https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}" target="_blank" rel="noopener">Abrir no Google Maps</a>`);
+    const prev = i > 0 ? validStops[i - 1] : null;
+    const offlineLink = `<a class="stop-nav-link" href="#" onclick="return popupNav(${prev ? prev.id : 'null'}, ${s.id});">${prev ? '🧭 Navegar até aqui (offline)' : '📍 Ver este ponto (offline)'}</a>`;
+    marker.bindPopup(`<b>${escapeHtml(badge)}. ${escapeHtml(s.label)}</b>${rangeInfo}<br>${s.lat.toFixed(5)}, ${s.lng.toFixed(5)}<br>${offlineLink}<br><a href="https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}" target="_blank" rel="noopener">Abrir no Google Maps</a>`);
     markersLayer.addLayer(marker);
     latlngs.push([s.lat, s.lng]);
   });
@@ -1773,6 +1767,15 @@ function buildOfflineRouteUrl(from, to) {
 function buildOfflinePointUrl(stop) {
   const label = encodeURIComponent((stop.label || 'Parada').slice(0, 60));
   return buildOfflineUrl(`map?v=1&ll=${stop.lat},${stop.lng}&n=${label}`);
+}
+// Chamado pelo link do popup do mapa. Monta o link na hora do clique, então
+// respeita o app escolhido (Organic Maps / Maps.me) mesmo se mudou depois.
+function popupNav(fromId, toId) {
+  const to = stops.find(x => x.id === toId);
+  if (!to) return false;
+  const from = fromId != null ? stops.find(x => x.id === fromId) : null;
+  openOfflineUrl(from ? buildOfflineRouteUrl(from, to) : buildOfflinePointUrl(to));
+  return false;
 }
 function buildOfflineAllPointsUrl(validStops) {
   const parts = validStops.map(s => `ll=${s.lat},${s.lng}&n=${encodeURIComponent((s.label || 'Parada').slice(0, 40))}`);
