@@ -961,16 +961,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <div class="container">
 
   <div class="card">
-    <h2>🧭 App de navegação offline</h2>
-    <div class="hint">App usado nos botões "Navegar" da lista e do mapa. Baixe o mapa da sua região dentro do app antes de ir a campo.</div>
-    <div class="row-actions">
-      <label style="display:flex; align-items:center; gap:6px; font-size:0.88rem; cursor:pointer;">
-        <input type="radio" name="nav-app" value="organicmaps" id="nav-app-organic" checked> Organic Maps (recomendado)
-      </label>
-      <label style="display:flex; align-items:center; gap:6px; font-size:0.88rem; cursor:pointer;">
-        <input type="radio" name="nav-app" value="mapsme" id="nav-app-mapsme"> Maps.me
-      </label>
-    </div>
+    <h2>🧭 Navegação offline</h2>
+    <div class="hint">Os botões "Navegar" usam o Organic Maps. Baixe o mapa da sua região dentro do app antes de ir a campo.</div>
   </div>
 
   <div class="card">
@@ -1022,7 +1014,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <button class="btn ghost" id="btn-open-offline-allpoints">📍 Ver todos os pontos no app offline</button>
     </div>
     <div class="hint" style="margin-top:8px;">
-      O mapa acima é só para visualização geral. Com internet, use "Google Maps" — abre a rota inteira, na ordem atual, direto no app. Sem internet, use os botões "🧭 Navegar" na lista de paradas abaixo — cada um abre no app offline escolhido a rota só daquela parada para a próxima (o Organic Maps/Maps.me não faz rota com vários pontos de uma vez, então é uma etapa por vez, do mesmo jeito que você dirigiria).
+      O mapa acima é só para visualização geral. Com internet, use "Google Maps" — abre a rota inteira, na ordem atual, direto no app. Sem internet, use os botões "🧭 Navegar" na lista de paradas abaixo — cada um abre no app offline escolhido a rota só daquela parada para a próxima (o Organic Maps não faz rota com vários pontos de uma vez, então é uma etapa por vez, do mesmo jeito que você dirigiria).
     </div>
   </div>
 
@@ -1310,6 +1302,21 @@ async function optimizeRoute() {
   }
   statusEl.textContent = '⏳ Calculando a melhor ordem de visita pelas ruas reais...';
   statusEl.className = '';
+
+  // Sem internet, não tenta chamar o OSRM: usa imediatamente o algoritmo
+  // local. Isso evita espera/erro de rede e garante que a função continue
+  // útil em campo.
+  if (!navigator.onLine) {
+    const reordered = nearestNeighborOrder(validStops);
+    applyOrderToSlots(validStops, reordered);
+    const distanceKm = totalHaversineKm(reordered);
+    lastRouteStats = { distanceKm, durationMin: null, real: false };
+    saveStops();
+    renderAll();
+    statusEl.style.color = 'var(--laranja)';
+    statusEl.textContent = `📴 Sem internet: rota organizada por distância em linha reta (${distanceKm.toFixed(1)} km).`;
+    return;
+  }
 
   try {
     const coordStr = validStops.map(s => s.lng + ',' + s.lat).join(';');
@@ -1615,12 +1622,35 @@ let map = null;
 let markersLayer = null;
 let polylineLayer = null;
 
+function showOfflineMapNotice() {
+  const mapEl = document.getElementById('map');
+  if (!mapEl || mapEl.querySelector('.offline-map-notice')) return;
+  const notice = document.createElement('div');
+  notice.className = 'offline-map-notice';
+  notice.innerHTML = '📴 <b>Modo offline</b><br>Os pontos e a rota continuam disponíveis. O fundo do mapa precisa de internet ou de tiles previamente armazenados.';
+  Object.assign(notice.style, {
+    position: 'absolute', left: '10px', right: '10px', top: '10px', zIndex: 1001,
+    background: 'rgba(255,255,255,.95)', padding: '10px 12px', borderRadius: '8px',
+    boxShadow: '0 1px 5px rgba(0,0,0,.25)', fontSize: '.82rem', lineHeight: '1.35',
+    color: '#333', pointerEvents: 'none'
+  });
+  mapEl.appendChild(notice);
+}
+
 function initMap() {
   map = L.map('map').setView([-5.0, -42.5], 6);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  // O aplicativo funciona sem internet. O fundo do mapa, porém, depende
+  // de tiles do OpenStreetMap e não pode ser baixado pelo HTML quando o
+  // aparelho está offline. Mantemos os marcadores/rota funcionando e
+  // mostramos um aviso claro em vez de deixar o mapa parecer quebrado.
+  const tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors',
     maxZoom: 19,
   }).addTo(map);
+  tileLayer.on('tileerror', () => {
+    showOfflineMapNotice();
+  });
+  if (!navigator.onLine) showOfflineMapNotice();
   markersLayer = L.layerGroup().addTo(map);
   polylineLayer = null;
 }
@@ -1708,50 +1738,19 @@ function escapeHtml(s) {
 }
 
 // ============================================================
-// Links para apps de navegação offline (Organic Maps / Maps.me).
-// Nenhum dos dois calcula rota com vários pontos de uma vez só —
-// então cada "perna" da viagem (parada anterior -> esta parada) vira
-// um link de rota simples entre 2 pontos, do jeito que o app aceita.
-// Funciona sem internet DESDE QUE o mapa da região já esteja baixado
-// dentro do app escolhido.
-//
-// No Android, o link "https://dlink.maps.me/..." ou "https://omaps.app/..."
-// só abre o app de verdade se o Android tiver esse app "verificado" como
-// dono do link (config Abrir por padrão > Abrir links compatíveis) — e na
-// prática isso costuma vir desligado, então o celular trata como um link
-// normal e abre no navegador. Para contornar isso, no Android a gente monta
-// um link "intent://" pedindo explicitamente o pacote do app — isso força o
-// Android a abrir o app se ele estiver instalado, e só cai pro link https
-// (S.browser_fallback_url) se o app não existir no aparelho. Fora do
-// Android (iOS, desktop) mantém o link https normal.
+// Links para navegação offline — Organic Maps
+// Cada "perna" da viagem (parada anterior -> esta parada) vira
+// um link de rota simples entre 2 pontos. Funciona sem internet
+// desde que o mapa da região já esteja baixado no Organic Maps.
 // ============================================================
-function getSelectedNavApp() {
-  const el = document.querySelector('input[name="nav-app"]:checked');
-  return el ? el.value : 'organicmaps';
-}
 function isAndroid() {
   return /Android/i.test(navigator.userAgent || '');
 }
-function offlineAppScheme() {
-  return getSelectedNavApp() === 'mapsme' ? 'mapsme' : 'om';
-}
-function offlineAppPackage() {
-  return getSelectedNavApp() === 'mapsme' ? 'com.mapswithme.maps.pro' : 'app.organicmaps';
-}
-function offlineAppBaseUrl() {
-  return getSelectedNavApp() === 'mapsme' ? 'https://dlink.maps.me' : 'https://omaps.app';
-}
-// pathAndQuery é algo como "route?sll=...&saddr=...&dll=...&daddr=...&type=vehicle"
-// ou "map?v=1&ll=...&n=...". Monta o link https normal e, no Android, troca
-// por um link intent:// (mais confiável pra abrir o app direto).
-function buildOfflineUrl(pathAndQuery) {
-  const httpsUrl = `${offlineAppBaseUrl()}/${pathAndQuery}`;
+function buildOrganicMapsUrl(pathAndQuery) {
+  const httpsUrl = `https://omaps.app/${pathAndQuery}`;
   if (!isAndroid()) return httpsUrl;
-  return `intent://${pathAndQuery}#Intent;scheme=${offlineAppScheme()};package=${offlineAppPackage()};S.browser_fallback_url=${encodeURIComponent(httpsUrl)};end`;
+  return `intent://${pathAndQuery}#Intent;scheme=om;package=app.organicmaps;S.browser_fallback_url=${encodeURIComponent(httpsUrl)};end`;
 }
-// Links intent:// não devem ser abertos com window.open (pode virar aba em
-// branco em vez de chamar o app) — usa location.href nesse caso. Links
-// https normais continuam abrindo em nova aba.
 function openOfflineUrl(url) {
   if (url.startsWith('intent://')) {
     window.location.href = url;
@@ -1762,14 +1761,12 @@ function openOfflineUrl(url) {
 function buildOfflineRouteUrl(from, to) {
   const fromLabel = encodeURIComponent((from.label || 'Origem').slice(0, 60));
   const toLabel = encodeURIComponent((to.label || 'Destino').slice(0, 60));
-  return buildOfflineUrl(`route?sll=${from.lat},${from.lng}&saddr=${fromLabel}&dll=${to.lat},${to.lng}&daddr=${toLabel}&type=vehicle`);
+  return buildOrganicMapsUrl(`route?sll=${from.lat},${from.lng}&saddr=${fromLabel}&dll=${to.lat},${to.lng}&daddr=${toLabel}&type=vehicle`);
 }
 function buildOfflinePointUrl(stop) {
   const label = encodeURIComponent((stop.label || 'Parada').slice(0, 60));
-  return buildOfflineUrl(`map?v=1&ll=${stop.lat},${stop.lng}&n=${label}`);
+  return buildOrganicMapsUrl(`map?v=1&ll=${stop.lat},${stop.lng}&n=${label}`);
 }
-// Chamado pelo link do popup do mapa. Monta o link na hora do clique, então
-// respeita o app escolhido (Organic Maps / Maps.me) mesmo se mudou depois.
 function popupNav(fromId, toId) {
   const to = stops.find(x => x.id === toId);
   if (!to) return false;
@@ -1779,7 +1776,7 @@ function popupNav(fromId, toId) {
 }
 function buildOfflineAllPointsUrl(validStops) {
   const parts = validStops.map(s => `ll=${s.lat},${s.lng}&n=${encodeURIComponent((s.label || 'Parada').slice(0, 40))}`);
-  return buildOfflineUrl(`map?v=1&${parts.join('&')}`);
+  return buildOrganicMapsUrl(`map?v=1&${parts.join('&')}`);
 }
 
 function renderStopsList() {
@@ -1943,6 +1940,10 @@ document.getElementById('btn-clear-all').addEventListener('click', () => {
   }
 });
 document.getElementById('btn-open-gmaps').addEventListener('click', () => {
+  if (!navigator.onLine) {
+    alert('Você está sem internet. Use os botões 🧭 Navegar com o Organic Maps, desde que o mapa da região já esteja baixado no aplicativo.');
+    return;
+  }
   const validStops = getVisibleStops(false).filter(s => s.lat != null && s.lng != null);
   if (validStops.length < 1) {
     alert('Adicione ao menos uma parada com coordenadas válidas primeiro.');
@@ -1961,20 +1962,22 @@ document.getElementById('btn-open-offline-allpoints').addEventListener('click', 
   openOfflineUrl(buildOfflineAllPointsUrl(validStops));
 });
 
-// Preferência de app offline (Organic Maps / Maps.me) persiste e refaz os
-// links "Navegar" da lista, já que eles dependem de qual app está selecionado.
-const NAV_APP_KEY = 'gestor_rotas_nav_app_v1';
-(function initNavAppPreference() {
-  try {
-    const saved = localStorage.getItem(NAV_APP_KEY);
-    if (saved === 'mapsme') document.getElementById('nav-app-mapsme').checked = true;
-  } catch (e) { /* sem localStorage, mantém o padrão (organicmaps) */ }
-})();
-document.querySelectorAll('input[name="nav-app"]').forEach(radio => {
-  radio.addEventListener('change', () => {
-    try { localStorage.setItem(NAV_APP_KEY, getSelectedNavApp()); } catch (e) {}
-    renderStopsList();
-  });
+// ============================================================
+// Estado da conexão
+// ============================================================
+window.addEventListener('offline', () => {
+  showOfflineMapNotice();
+  const el = document.getElementById('optimize-status');
+  if (el) {
+    el.style.color = 'var(--laranja)';
+    el.textContent = '📴 Internet indisponível. O gestor continua funcionando offline; a otimização por ruas reais fica desativada.';
+  }
+});
+window.addEventListener('online', () => {
+  const notice = document.querySelector('.offline-map-notice');
+  if (notice) notice.remove();
+  const el = document.getElementById('optimize-status');
+  if (el) el.textContent = '🌐 Internet disponível. A otimização por ruas reais pode ser usada novamente.';
 });
 
 // ============================================================
