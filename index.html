@@ -4,6 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Gestor de Rotas — Obras</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#1a3a5c">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <style>
 /* required styles */
 
@@ -1983,9 +1988,22 @@ window.addEventListener('online', () => {
 // ============================================================
 // Inicialização
 // ============================================================
-initMap();
-renderAll();
+try { initMap(); } catch (e) { console.error('Falha ao iniciar o mapa:', e);
+  const m = document.getElementById('map');
+  if (m) m.innerHTML = '<div style="padding:16px;font-size:.9rem">⚠️ Mapa indisponível. A lista de paradas continua funcionando.</div>';
+}
+try { renderAll(); } catch (e) { console.error('Falha ao renderizar:', e); }
 updateSaveIndicator(persistenceAvailable);
+
+// ============================================================
+// Service Worker: guarda o app (e os tiles já vistos) para abrir 100% offline.
+// Exige HTTPS (ou localhost); não funciona em file://.
+// ============================================================
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW não registrado:', e));
+  });
+}
 </script>
 </body>
 </html>
