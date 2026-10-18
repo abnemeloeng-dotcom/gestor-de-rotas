@@ -1122,6 +1122,74 @@ function extractCoordsFromUrl(url) {
   return null;
 }
 
+// ------------------------------------------------------------
+// Links curtos (maps.app.goo.gl/XXXX): o link em si não tem coordenadas,
+// só redireciona para a URL completa. O navegador não deixa ler esse
+// redirecionamento direto (CORS), então passamos por proxies públicos
+// que seguem o redirect e devolvem a URL final e/ou o HTML da página.
+// ------------------------------------------------------------
+function isShortMapsLink(url) {
+  return /maps\.app\.goo\.gl|goo\.gl\/maps/i.test(url);
+}
+// Procura coordenadas dentro do HTML/texto de uma página do Google Maps
+function extractCoordsFromHtml(html) {
+  if (!html) return null;
+  let m = html.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+  if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]), source: 'html-3d4d' };
+  m = html.match(/center=(-?\d+\.\d+)(?:%2C|,)(-?\d+\.\d+)/i);
+  if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]), source: 'html-center' };
+  m = html.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+  if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]), source: 'html-@' };
+  m = html.match(/\[null,null,(-?\d+\.\d{3,}),(-?\d+\.\d{3,})\]/);
+  if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]), source: 'html-array' };
+  return null;
+}
+async function fetchWithTimeout(url, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, { signal: ctrl.signal }); }
+  finally { clearTimeout(t); }
+}
+// Tenta resolver um link curto em coordenadas. Retorna {lat,lng,source} ou null.
+async function resolveShortLink(shortUrl) {
+  if (!navigator.onLine) return null;
+  const enc = encodeURIComponent(shortUrl);
+  // Proxy 1: allorigins devolve a URL final (status.url) e o conteúdo da página
+  try {
+    const r = await fetchWithTimeout('https://api.allorigins.win/get?url=' + enc, 12000);
+    if (r.ok) {
+      const j = await r.json();
+      const finalUrl = j && j.status && j.status.url;
+      let c = finalUrl ? extractCoordsFromUrl(finalUrl) : null;
+      if (!c) c = extractCoordsFromHtml(j && j.contents);
+      if (c) return { ...c, source: 'link-curto' };
+    }
+  } catch (e) { /* tenta o próximo */ }
+  // Proxy 2: corsproxy.io devolve só o conteúdo da página seguida
+  try {
+    const r = await fetchWithTimeout('https://corsproxy.io/?url=' + enc, 12000);
+    if (r.ok) {
+      const c = extractCoordsFromUrl(r.url) || extractCoordsFromHtml(await r.text());
+      if (c) return { ...c, source: 'link-curto' };
+    }
+  } catch (e) { /* sem sorte */ }
+  return null;
+}
+// Resolve (em segundo plano) as paradas pendentes que vieram de link curto
+async function resolvePendingShortLinks(onlyId) {
+  const pending = stops.filter(s => s.needsFix && isShortMapsLink(s.rawUrl || '') && (onlyId == null || s.id === onlyId));
+  if (!pending.length) return;
+  const statusEl = document.getElementById('status-msg');
+  let ok = 0;
+  for (const s of pending) {
+    const c = await resolveShortLink(s.rawUrl);
+    if (c) { s.lat = c.lat; s.lng = c.lng; s.needsFix = false; ok++; saveStops(); renderAll(); }
+  }
+  statusEl.className = ok === pending.length ? 'ok' : 'warn';
+  statusEl.textContent = `🔗 Links curtos: ${ok} de ${pending.length} resolvido(s) automaticamente.` +
+    (ok < pending.length ? ' Os demais continuam em laranja: use "Tentar de novo" ou preencha manualmente.' : '');
+}
+
 // Tenta achar uma data no começo do texto de identificação colado, no
 // formato DD/MM (ou DD/MM/AA, DD/MM/AAAA) — muita gente já anota a data ali,
 // como no exemplo da própria dica acima ("07/08- NOTA..."). Se achar, essa
@@ -1256,6 +1324,10 @@ function processInput() {
   if (needFix) msg += ` ${needFix} sem coordenada extraída automaticamente — preencha manualmente na lista abaixo (procure pelo destaque laranja).`;
   if (leftover) msg += `\nObs: o texto "${leftover.slice(0,60)}" ficou sem link associado e foi ignorado.`;
   statusEl.textContent = msg;
+  if (needFix) {
+    statusEl.textContent += '\n🔄 Tentando resolver links curtos automaticamente...';
+    resolvePendingShortLinks();
+  }
 }
 
 // ============================================================
@@ -1830,6 +1902,7 @@ function renderStopsList() {
                <input type="text" placeholder="latitude (ex: -4.94687)" id="lat-${s.id}">
                <input type="text" placeholder="longitude (ex: -42.70081)" id="lng-${s.id}">
                <button class="btn small green" data-fix="${s.id}">Salvar</button>
+               ${isShortMapsLink(s.rawUrl || '') ? `<button class="btn small" data-retry="${s.id}">🔄 Tentar de novo</button>` : ''}
              </div>`
           : `<div class="stop-coords">${s.lat.toFixed(5)}, ${s.lng.toFixed(5)}</div>
              ${idx > 0 && visible[idx - 1].lat != null
@@ -1852,6 +1925,10 @@ function renderStopsList() {
   wrap.querySelectorAll('[data-down]').forEach(b => b.addEventListener('click', () => moveStop(parseInt(b.dataset.down), 1)));
   wrap.querySelectorAll('[data-remove]').forEach(b => b.addEventListener('click', () => {
     if (confirm('Remover esta parada da lista?')) removeStop(parseInt(b.dataset.remove));
+  }));
+  wrap.querySelectorAll('[data-retry]').forEach(b => b.addEventListener('click', () => {
+    b.disabled = true; b.textContent = '⏳ ...';
+    resolvePendingShortLinks(parseInt(b.dataset.retry));
   }));
   wrap.querySelectorAll('[data-fix]').forEach(b => b.addEventListener('click', () => {
     const id = parseInt(b.dataset.fix);
